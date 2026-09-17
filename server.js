@@ -9,8 +9,19 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server });
 const peers = new Map(); // userId -> { ws, name }
 
+// Flood protection: cap how many signaling messages a single connection can
+// send in a rolling window, so one misbehaving client can't spam another
+// user with call-requests/ICE candidates.
+const RATE_WINDOW_MS = 10_000;
+const RATE_MAX_MSGS = 60;
+
 wss.on('connection', (ws) => {
     let userId = null;
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
+    let msgCount = 0;
+    let windowStart = Date.now();
 
     const send = (data) => {
         try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); } catch {}
@@ -26,6 +37,10 @@ wss.on('connection', (ws) => {
     };
 
     ws.on('message', (raw) => {
+        const now = Date.now();
+        if (now - windowStart > RATE_WINDOW_MS) { windowStart = now; msgCount = 0; }
+        if (++msgCount > RATE_MAX_MSGS) return;
+
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
 
@@ -54,4 +69,18 @@ wss.on('connection', (ws) => {
     ws.on('error', () => { if (userId) peers.delete(userId); });
 });
 
-server.listen(3000, () => console.log('[CM-Signaling] listening on :3000'));
+// Detect and drop half-open connections (e.g. a laptop that went to sleep
+// mid-call) that never sent a close frame — without this, a dead peer can
+// sit in the map reporting as "available" until the OS-level TCP timeout,
+// which can be minutes, so calls silently fail to connect.
+const heartbeatInterval = setInterval(() => {
+    for (const ws of wss.clients) {
+        if (ws.isAlive === false) { ws.terminate(); continue; }
+        ws.isAlive = false;
+        try { ws.ping(); } catch {}
+    }
+}, 30_000);
+wss.on('close', () => clearInterval(heartbeatInterval));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`[CM-Signaling] listening on :${PORT}`));
