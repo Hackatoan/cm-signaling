@@ -65,8 +65,12 @@ wss.on('connection', (ws) => {
         }
     });
 
-    ws.on('close', () => { if (userId) peers.delete(userId); });
-    ws.on('error', () => { if (userId) peers.delete(userId); });
+    // Only remove the map entry if it still points at *this* socket — a user
+    // reconnecting (e.g. a second tab) overwrites the entry with the new
+    // socket, and the old socket's close/error must not evict it.
+    const unregister = () => { if (userId && peers.get(userId)?.ws === ws) peers.delete(userId); };
+    ws.on('close', unregister);
+    ws.on('error', unregister);
 });
 
 // Detect and drop half-open connections (e.g. a laptop that went to sleep
