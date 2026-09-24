@@ -31,7 +31,10 @@ async function verifyOwnership(userId, token) {
         });
         if (!res.ok) return false;
         const body = await res.json();
-        return body && String(body.id) === String(userId);
+        // Compare against canvasUserId, not relay's own `id` (a different
+        // identity namespace) — canvasUserId is what call routing/userId
+        // already means throughout this file.
+        return body && body.canvasUserId != null && String(body.canvasUserId) === String(userId);
     } catch {
         return false; // fail closed: relay unreachable/erroring means we can't prove ownership
     } finally {
