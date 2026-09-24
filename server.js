@@ -6,7 +6,43 @@ const server = http.createServer((req, res) => {
     res.end('CM Signaling OK');
 });
 
-const wss = new WebSocket.Server({ server });
+// Optional identity verification against cm-relay (the REST API that owns
+// user accounts and bearer tokens). SECURITY: without this, 'register'
+// accepts any client-supplied userId with no proof of ownership, so anyone
+// who can reach this WebSocket endpoint can claim another user's signaling
+// identity and receive their call-requests/offers/answers/ICE. Set RELAY_URL
+// to turn on enforcement; left unset, behavior is unchanged from before this
+// patch (see PR description for why this is opt-in rather than on by default).
+const RELAY_URL = (process.env.RELAY_URL || '').replace(/\/$/, '');
+const RELAY_TIMEOUT_MS = 3_000;
+if (!RELAY_URL) {
+    console.warn('[CM-Signaling] RELAY_URL not set — register is UNAUTHENTICATED (any client can claim any userId). See README/PR notes before enabling in production.');
+}
+
+async function verifyOwnership(userId, token) {
+    if (!RELAY_URL) return true; // legacy/unconfigured: no verification available
+    if (!token || typeof token !== 'string') return false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), RELAY_TIMEOUT_MS);
+    try {
+        const res = await fetch(`${RELAY_URL}/api/me`, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: controller.signal,
+        });
+        if (!res.ok) return false;
+        const body = await res.json();
+        return body && String(body.id) === String(userId);
+    } catch {
+        return false; // fail closed: relay unreachable/erroring means we can't prove ownership
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+const MAX_ID_LEN = 200;
+const MAX_NAME_LEN = 100;
+
+const wss = new WebSocket.Server({ server, maxPayload: 64 * 1024 }); // cap frame size: SDP/ICE messages are small; without this a client can send up to ws's 100MB default per-message, a cheap DoS lever on a public endpoint
 const peers = new Map(); // userId -> { ws, name }
 
 // Flood protection: cap how many signaling messages a single connection can
@@ -36,7 +72,7 @@ wss.on('connection', (ws) => {
         return false;
     };
 
-    ws.on('message', (raw) => {
+    ws.on('message', async (raw) => {
         const now = Date.now();
         if (now - windowStart > RATE_WINDOW_MS) { windowStart = now; msgCount = 0; }
         if (++msgCount > RATE_MAX_MSGS) return;
@@ -45,13 +81,22 @@ wss.on('connection', (ws) => {
         try { msg = JSON.parse(raw); } catch { return; }
 
         switch (msg.type) {
-            case 'register':
+            case 'register': {
+                const candidateId = String(msg.userId ?? '').slice(0, MAX_ID_LEN);
+                const candidateName = String(msg.name || candidateId).slice(0, MAX_NAME_LEN);
+                if (!candidateId) return;
+                if (!(await verifyOwnership(candidateId, msg.token))) {
+                    send({ type: 'register-failed', reason: 'Unauthorized' });
+                    return;
+                }
                 if (userId) peers.delete(userId);
-                userId = String(msg.userId);
-                peers.set(userId, { ws, name: msg.name || userId });
+                userId = candidateId;
+                peers.set(userId, { ws, name: candidateName });
                 send({ type: 'registered', userId });
                 break;
+            }
             case 'call-request':
+                if (!userId) return;
                 if (!relay(msg.to, msg)) send({ type: 'call-failed', reason: 'User not available' });
                 break;
             case 'call-accepted':
@@ -60,6 +105,7 @@ wss.on('connection', (ws) => {
             case 'offer':
             case 'answer':
             case 'ice':
+                if (!userId) return;
                 relay(msg.to, msg);
                 break;
         }

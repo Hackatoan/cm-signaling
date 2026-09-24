@@ -27,6 +27,11 @@ npm install
 npm start   # listens on :3000
 ```
 
+## Configuration
+
+- `PORT` — listen port (default `3000`).
+- `RELAY_URL` — base URL of the paired [`cm-relay`](https://github.com/Hackatoan/cm-relay) instance (e.g. `https://relay.hackatoa.com`). When set, `register` requests are verified against relay's `GET /api/me` (bearer token) before a client is allowed to claim a `userId`. **Requires** a `/api/me` endpoint on cm-relay and the `canvas-messenger` client to send its relay `authToken` on register — do not set this in production until both are in place. Left unset, `register` behaves as before this option was added (no identity verification).
+
 ## Deployment
 
 Docker image `ghcr.io/hackatoan/cm-signaling:latest` built by GitHub Actions; runs on the homelab behind NPMplus at `signaling.hackatoa.com`.
