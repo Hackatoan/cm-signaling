@@ -56,6 +56,9 @@ const RATE_MAX_MSGS = 60;
 
 wss.on('connection', (ws) => {
     let userId = null;
+    // Cached alongside userId at register time so relay() doesn't need a
+    // second peers.get() per message just to read back our own name.
+    let userName = null;
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
@@ -68,7 +71,7 @@ wss.on('connection', (ws) => {
     const relay = (to, payload) => {
         const peer = peers.get(String(to));
         if (peer?.ws.readyState === WebSocket.OPEN) {
-            try { peer.ws.send(JSON.stringify({ ...payload, from: userId, fromName: peers.get(userId)?.name })); }
+            try { peer.ws.send(JSON.stringify({ ...payload, from: userId, fromName: userName })); }
             catch {}
             return true;
         }
@@ -94,6 +97,7 @@ wss.on('connection', (ws) => {
                 }
                 if (userId) peers.delete(userId);
                 userId = candidateId;
+                userName = candidateName;
                 peers.set(userId, { ws, name: candidateName });
                 send({ type: 'registered', userId });
                 break;
