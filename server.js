@@ -54,6 +54,12 @@ const peers = new Map(); // userId -> { ws, name }
 const RATE_WINDOW_MS = 10_000;
 const RATE_MAX_MSGS = 60;
 
+// A connection that never registers still counts as "alive" to the
+// heartbeat (compliant clients auto-answer ping with pong at the protocol
+// level), so without this an unauthenticated socket could sit open
+// indefinitely, holding a connection slot on a public endpoint for free.
+const REGISTER_TIMEOUT_MS = 15_000;
+
 wss.on('connection', (ws) => {
     let userId = null;
     // Cached alongside userId at register time so relay() doesn't need a
@@ -61,6 +67,10 @@ wss.on('connection', (ws) => {
     let userName = null;
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
+
+    const registerTimer = setTimeout(() => {
+        if (!userId) { try { ws.close(4001, 'Registration timeout'); } catch {} }
+    }, REGISTER_TIMEOUT_MS);
 
     let msgCount = 0;
     let windowStart = Date.now();
@@ -108,6 +118,7 @@ wss.on('connection', (ws) => {
                 userId = candidateId;
                 userName = candidateName;
                 peers.set(userId, { ws, name: candidateName });
+                clearTimeout(registerTimer);
                 send({ type: 'registered', userId });
                 break;
             }
@@ -130,7 +141,7 @@ wss.on('connection', (ws) => {
     // Only remove the map entry if it still points at *this* socket — a user
     // reconnecting (e.g. a second tab) overwrites the entry with the new
     // socket, and the old socket's close/error must not evict it.
-    const unregister = () => { if (userId && peers.get(userId)?.ws === ws) peers.delete(userId); };
+    const unregister = () => { clearTimeout(registerTimer); if (userId && peers.get(userId)?.ws === ws) peers.delete(userId); };
     ws.on('close', unregister);
     ws.on('error', unregister);
 });
