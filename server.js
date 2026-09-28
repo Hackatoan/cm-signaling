@@ -71,7 +71,16 @@ wss.on('connection', (ws) => {
     const relay = (to, payload) => {
         const peer = peers.get(String(to));
         if (peer?.ws.readyState === WebSocket.OPEN) {
-            try { peer.ws.send(JSON.stringify({ ...payload, from: userId, fromName: userName })); }
+            // Mutate the already-parsed message in place instead of spreading
+            // it into a fresh object on every call. `payload` is always the
+            // per-message object from JSON.parse(raw) and is never reused
+            // after this, so there's no aliasing risk — this just avoids an
+            // extra object allocation + property copy on the hottest path in
+            // the server (every offer/answer/ice/call-* message goes through
+            // relay(), and a single call can generate dozens of ICE hops).
+            payload.from = userId;
+            payload.fromName = userName;
+            try { peer.ws.send(JSON.stringify(payload)); }
             catch {}
             return true;
         }
