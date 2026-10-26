@@ -74,6 +74,7 @@ wss.on('connection', (ws) => {
 
     let msgCount = 0;
     let windowStart = Date.now();
+    let failedRegisterAttempts = 0;
 
     const send = (data) => {
         try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); } catch {}
@@ -111,7 +112,11 @@ wss.on('connection', (ws) => {
                 const candidateName = String(msg.name || candidateId).slice(0, MAX_NAME_LEN);
                 if (!candidateId) return;
                 if (!(await verifyOwnership(candidateId, msg.token))) {
+                    failedRegisterAttempts++;
                     send({ type: 'register-failed', reason: 'Unauthorized' });
+                    if (failedRegisterAttempts >= 3) {
+                        try { ws.close(4003, 'Too many failed register attempts'); } catch {}
+                    }
                     return;
                 }
                 if (userId) peers.delete(userId);
