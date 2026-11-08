@@ -98,7 +98,7 @@ wss.on('connection', (ws) => {
         return false;
     };
 
-    ws.on('message', async (raw) => {
+    const onMessage = async (raw) => {
         const now = Date.now();
         if (now - windowStart > RATE_WINDOW_MS) { windowStart = now; msgCount = 0; }
         if (++msgCount > RATE_MAX_MSGS) return;
@@ -144,6 +144,12 @@ wss.on('connection', (ws) => {
                 relay(msg.to, msg);
                 break;
         }
+    };
+    // Any throw inside the async handler (e.g. a field that can't be coerced
+    // to a string) would otherwise be an unhandled rejection, which
+    // terminates the whole process on Node 15+. Drop the message instead.
+    ws.on('message', (raw) => {
+        onMessage(raw).catch((err) => console.warn('[CM-Signaling] dropped bad message:', err?.message));
     });
 
     // Only remove the map entry if it still points at *this* socket — a user
