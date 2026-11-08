@@ -75,6 +75,11 @@ wss.on('connection', (ws) => {
     let msgCount = 0;
     let windowStart = Date.now();
     let failedRegisterAttempts = 0;
+    // Only one register may be awaiting relay verification at a time.
+    // Without this, a client can queue many registers before the first
+    // verdict lands, so each one triggers its own outbound /api/me call and
+    // the failed-attempt cap below is only checked after they've all gone out.
+    let registerInFlight = false;
 
     const send = (data) => {
         try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); } catch {}
@@ -110,8 +115,16 @@ wss.on('connection', (ws) => {
             case 'register': {
                 const candidateId = String(msg.userId ?? '').slice(0, MAX_ID_LEN);
                 const candidateName = String(msg.name || candidateId).slice(0, MAX_NAME_LEN);
-                if (!candidateId) return;
-                if (!(await verifyOwnership(candidateId, msg.token))) {
+                if (!candidateId || registerInFlight) return;
+                registerInFlight = true;
+                let verified;
+                try { verified = await verifyOwnership(candidateId, msg.token); }
+                finally { registerInFlight = false; }
+                // The socket may have closed while we awaited the relay; its
+                // close handler has already run, so registering now would
+                // leave a dead entry that shadows the user's live connection.
+                if (ws.readyState !== WebSocket.OPEN) return;
+                if (!verified) {
                     failedRegisterAttempts++;
                     send({ type: 'register-failed', reason: 'Unauthorized' });
                     if (failedRegisterAttempts >= 3) {
