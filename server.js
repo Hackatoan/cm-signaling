@@ -105,6 +105,9 @@ wss.on('connection', (ws) => {
 
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
+        // Valid JSON isn't necessarily an object (e.g. `null`, a number); reading
+        // .type off a non-object would throw inside this async handler.
+        if (!msg || typeof msg !== 'object') return;
 
         switch (msg.type) {
             case 'register': {
