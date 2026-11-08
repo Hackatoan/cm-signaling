@@ -19,9 +19,13 @@ if (!RELAY_URL) {
     console.warn('[CM-Signaling] RELAY_URL not set — register is UNAUTHENTICATED (any client can claim any userId). See README/PR notes before enabling in production.');
 }
 
+// Resolves to the caller's Canvas instance (a namespace for userId) on
+// success, or null on failure. Canvas user IDs are only unique within one
+// Canvas instance, so the instance has to be part of the peer key — otherwise
+// the same numeric ID on two different instances maps to one signaling slot.
 async function verifyOwnership(userId, token) {
-    if (!RELAY_URL) return true; // legacy/unconfigured: no verification available
-    if (!token || typeof token !== 'string') return false;
+    if (!RELAY_URL) return ''; // legacy/unconfigured: no verification, single namespace
+    if (!token || typeof token !== 'string') return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), RELAY_TIMEOUT_MS);
     try {
@@ -29,14 +33,16 @@ async function verifyOwnership(userId, token) {
             headers: { Authorization: `Bearer ${token}` },
             signal: controller.signal,
         });
-        if (!res.ok) return false;
+        if (!res.ok) return null;
         const body = await res.json();
         // Compare against canvasUserId, not relay's own `id` (a different
         // identity namespace) — canvasUserId is what call routing/userId
         // already means throughout this file.
-        return body && body.canvasUserId != null && String(body.canvasUserId) === String(userId);
+        if (!body || body.canvasUserId == null || String(body.canvasUserId) !== String(userId)) return null;
+        if (typeof body.canvasUrl !== 'string' || !body.canvasUrl) return null;
+        return body.canvasUrl;
     } catch {
-        return false; // fail closed: relay unreachable/erroring means we can't prove ownership
+        return null; // fail closed: relay unreachable/erroring means we can't prove ownership
     } finally {
         clearTimeout(timer);
     }
@@ -46,7 +52,8 @@ const MAX_ID_LEN = 200;
 const MAX_NAME_LEN = 100;
 
 const wss = new WebSocket.Server({ server, maxPayload: 64 * 1024 }); // cap frame size: SDP/ICE messages are small; without this a client can send up to ws's 100MB default per-message, a cheap DoS lever on a public endpoint
-const peers = new Map(); // userId -> { ws, name }
+const peers = new Map(); // peerKey(namespace, userId) -> { ws, name }
+const peerKey = (ns, id) => JSON.stringify([ns, String(id)]);
 
 // Flood protection: cap how many signaling messages a single connection can
 // send in a rolling window, so one misbehaving client can't spam another
@@ -65,6 +72,8 @@ wss.on('connection', (ws) => {
     // Cached alongside userId at register time so relay() doesn't need a
     // second peers.get() per message just to read back our own name.
     let userName = null;
+    let userNs = null; // relay-verified Canvas instance for userId
+    let peerId = null; // peerKey(userNs, userId)
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
@@ -85,7 +94,8 @@ wss.on('connection', (ws) => {
         try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); } catch {}
     };
     const relay = (to, payload) => {
-        const peer = peers.get(String(to));
+        // Only route within the caller's own Canvas instance.
+        const peer = peers.get(peerKey(userNs, to));
         if (peer?.ws.readyState === WebSocket.OPEN) {
             // Mutate the already-parsed message in place instead of spreading
             // it into a fresh object on every call. `payload` is always the
@@ -120,14 +130,14 @@ wss.on('connection', (ws) => {
                 const candidateName = String(msg.name || candidateId).slice(0, MAX_NAME_LEN);
                 if (!candidateId || registerInFlight) return;
                 registerInFlight = true;
-                let verified;
-                try { verified = await verifyOwnership(candidateId, msg.token); }
+                let ns;
+                try { ns = await verifyOwnership(candidateId, msg.token); }
                 finally { registerInFlight = false; }
                 // The socket may have closed while we awaited the relay; its
                 // close handler has already run, so registering now would
                 // leave a dead entry that shadows the user's live connection.
                 if (ws.readyState !== WebSocket.OPEN) return;
-                if (!verified) {
+                if (ns == null) {
                     failedRegisterAttempts++;
                     send({ type: 'register-failed', reason: 'Unauthorized' });
                     if (failedRegisterAttempts >= 3) {
@@ -135,10 +145,12 @@ wss.on('connection', (ws) => {
                     }
                     return;
                 }
-                if (userId) peers.delete(userId);
+                if (peerId && peers.get(peerId)?.ws === ws) peers.delete(peerId);
                 userId = candidateId;
                 userName = candidateName;
-                peers.set(userId, { ws, name: candidateName });
+                userNs = ns;
+                peerId = peerKey(ns, candidateId);
+                peers.set(peerId, { ws, name: candidateName });
                 clearTimeout(registerTimer);
                 send({ type: 'registered', userId });
                 break;
@@ -168,7 +180,7 @@ wss.on('connection', (ws) => {
     // Only remove the map entry if it still points at *this* socket — a user
     // reconnecting (e.g. a second tab) overwrites the entry with the new
     // socket, and the old socket's close/error must not evict it.
-    const unregister = () => { clearTimeout(registerTimer); if (userId && peers.get(userId)?.ws === ws) peers.delete(userId); };
+    const unregister = () => { clearTimeout(registerTimer); if (peerId && peers.get(peerId)?.ws === ws) peers.delete(peerId); };
     ws.on('close', unregister);
     ws.on('error', unregister);
 });
