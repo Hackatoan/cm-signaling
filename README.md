@@ -15,6 +15,7 @@ The WebRTC signaling backend for [Canvas Messenger](https://github.com/Hackatoan
 - Socket.IO-based WebRTC signaling (offer/answer/ICE exchange)
 - Lightweight and stateless
 - Container-friendly
+- `GET /health` JSON health check (`status`, `version`, `uptimeSeconds`)
 
 ## Tech Stack
 
@@ -30,6 +31,7 @@ npm start   # listens on :3000
 ## Configuration
 
 - `PORT` — listen port (default `3000`).
+- `HEALTH_STATS` — set to `1` to add live `connections` and `registeredPeers` counts to `GET /health`. Off by default so the public endpoint doesn't reveal how many users are online.
 - `RELAY_URL` — base URL of the paired [`cm-relay`](https://github.com/Hackatoan/cm-relay) instance (e.g. `https://relay.hackatoa.com`). When set, `register` requests are verified against relay's `GET /api/me` (bearer token) before a client is allowed to claim a `userId`. **Requires** a `/api/me` endpoint on cm-relay and the `canvas-messenger` client to send its relay `authToken` on register — do not set this in production until both are in place. Left unset, `register` behaves as before this option was added (no identity verification).
 
 ## Deployment
