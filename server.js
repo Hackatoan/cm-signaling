@@ -1,7 +1,25 @@
 const WebSocket = require('ws');
 const http = require('http');
 
+const { version } = require('./package.json');
+const STARTED_AT = Date.now();
+// Opt-in: include live connection/peer counts in /health. Off by default so
+// the public endpoint doesn't advertise how many users are online.
+const HEALTH_STATS = process.env.HEALTH_STATS === '1';
+
 const server = http.createServer((req, res) => {
+    // Machine-readable health check for uptime monitors / deploy-drift checks.
+    // Every other path keeps the original plain-text response.
+    if (req.method === 'GET' && (req.url === '/health' || req.url.startsWith('/health?'))) {
+        const body = { status: 'ok', version, uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000) };
+        if (HEALTH_STATS) {
+            body.connections = wss.clients.size;
+            body.registeredPeers = peers.size;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(body));
+        return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('CM Signaling OK');
 });
